@@ -110,9 +110,18 @@ if st.session_state.step == 1:
             else:
                 with st.spinner("AI is translating and formatting..."):
                     async def get_preview():
-                        # Use the AI to translate and format, but keep it as a script for editing
+                        # Await the coroutine to get the client and config
+                        client, config = await engine._get_next_client()
+                        if not client:
+                            raise Exception("No API keys provided.")
+                        
                         prompt = f"Translate the following script to {selected_lang_name} while keeping the [HH:MM:SS] timestamps. Return only the translated script."
-                        return await engine._get_next_client().generate_content_async(f"{prompt}\n\n{st.session_state.script_content}")
+                        response = await client.models.generate_content(
+                            model='gemini-3-flash', # Keeping user's model name
+                            contents=f"{prompt}\n\n{st.session_state.script_content}",
+                            config=config
+                        )
+                        return response
                     
                     try:
                         response = asyncio.run(get_preview())
