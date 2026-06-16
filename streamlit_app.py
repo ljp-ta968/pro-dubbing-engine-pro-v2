@@ -13,7 +13,7 @@ nest_asyncio.apply()
 
 st.set_page_config(page_title="Pro Dubbing Engine V2", page_icon="🎙️", layout="wide")
 
-st.title("🎙️ Pro Dubbing Engine - Step-by-Step Workflow")
+st.title("🎙️ Pro Dubbing Engine - Hybrid Workflow")
 st.markdown("---")
 
 # Initialize Session State
@@ -71,20 +71,6 @@ with st.sidebar:
 
 # Initialize engine
 engine = ProDubbingEngine(api_keys=api_keys if api_keys else [])
-
-# Step Tracker UI
-step_cols = st.columns(5)
-steps = ["1. SRT Prep", "2. Sentence Prep", "3. TTS Generation", "4. Merging", "5. Download"]
-for i, s_name in enumerate(steps):
-    with step_cols[i]:
-        if st.session_state.step == i + 1:
-            st.markdown(f"**🔵 {s_name}**")
-        elif st.session_state.step > i + 1:
-            st.markdown(f"✅ {s_name}")
-        else:
-            st.markdown(f"⚪ {s_name}")
-
-st.divider()
 
 # Main UI Logic
 if st.session_state.step == 1:
@@ -156,7 +142,7 @@ elif st.session_state.step == 2:
         st.rerun()
 
 elif st.session_state.step == 3:
-    st.subheader("Step 3: Parallel TTS Generation")
+    st.subheader("Step 3: Professional Dubbing (One-Click)")
     
     st.write(f"✅ Grouped into **{len(st.session_state.sentences)}** sentences.")
     
@@ -168,92 +154,71 @@ elif st.session_state.step == 3:
         value=min(len(st.session_state.sentences), 5)
     )
 
-    if st.button("Start TTS Generation 🚀", use_container_width=True):
+    if st.button("🚀 Start Parallel Professional Dubbing", use_container_width=True):
         start_time = time.time()
         timer_placeholder = st.empty()
         
-        with st.spinner("Generating TTS..."):
-            async def run_tts():
+        with st.spinner("Processing TTS and Merging Audio..."):
+            async def main_workflow():
                 # Reset worker statuses
                 st.session_state.worker_statuses = {i+1: "Idle" for i in range(num_chunks)}
-                
-                # We need a temp directory that persists for the next step or we handle it here
-                # For step-by-step, we'll use a fixed temp directory or session state to store paths
-                temp_dir = tempfile.mkdtemp()
-                st.session_state.temp_dir = temp_dir
-                
-                def ui_callback(worker_id, msg):
-                    update_status(worker_id, msg)
+                update_status(0, "")
 
-                task = asyncio.create_task(engine.process_workflow_parallel(st.session_state.segments, num_chunks, temp_dir, status_callback=ui_callback))
-                
-                while not task.done():
+                with tempfile.TemporaryDirectory() as tmp_dir:
+                    def ui_callback(worker_id, msg):
+                        update_status(worker_id, msg)
+
+                    # Run Parallel TTS
+                    task = asyncio.create_task(engine.process_workflow_parallel(st.session_state.segments, num_chunks, tmp_dir, status_callback=ui_callback))
+                    
+                    while not task.done():
+                        elapsed = time.time() - start_time
+                        timer_placeholder.markdown(f"### ⏱️ Running Time: {time.strftime('%H:%M:%S', time.gmtime(elapsed))}")
+                        await asyncio.sleep(1)
+                    
+                    results = await task
+                    st.session_state.results = results
+
+                    # Merge Audio
+                    merged_audio_path = os.path.join(tmp_dir, "dubbed_audio.mp3")
+                    if engine.merge_audio_files(st.session_state.segments, merged_audio_path):
+                        with open(merged_audio_path, "rb") as f:
+                            st.session_state.merged_audio_data = f.read()
+                        st.session_state.generated_srt_content = engine.generate_srt_content(st.session_state.segments)
+                    
                     elapsed = time.time() - start_time
-                    timer_placeholder.markdown(f"### ⏱️ Running Time: {time.strftime('%H:%M:%S', time.gmtime(elapsed))}")
-                    await asyncio.sleep(1)
-                
-                return await task
+                    timer_placeholder.markdown(f"### ✅ Total Process Time: {time.strftime('%H:%M:%S', time.gmtime(elapsed))}")
 
-            results = asyncio.run(run_tts())
-            st.session_state.results = results
-            st.session_state.step = 4
-            st.rerun()
+            asyncio.run(main_workflow())
+            st.success("✅ Dubbing process completed!")
 
     if st.button("⬅️ Back to Step 2"):
         st.session_state.step = 2
         st.rerun()
 
-elif st.session_state.step == 4:
-    st.subheader("Step 4: Audio Merging")
-    
-    if st.session_state.results:
-        st.write(f"Total Segments: {st.session_state.results['total']} | Successful: {st.session_state.results['successful']}")
-    
-    st.info("Merging all individual segment audio files into one final MP3 file with proper timing.")
-    
-    if st.button("Merge Audio 🎵", use_container_width=True):
-        with st.spinner("Merging..."):
-            merged_audio_path = os.path.join(st.session_state.temp_dir, "dubbed_audio.mp3")
-            if engine.merge_audio_files(st.session_state.segments, merged_audio_path):
-                with open(merged_audio_path, "rb") as f:
-                    st.session_state.merged_audio_data = f.read()
-                st.session_state.generated_srt_content = engine.generate_srt_content(st.session_state.segments)
-                st.session_state.step = 5
-                st.rerun()
-            else:
-                st.error("❌ Failed to merge audio files. Please check if TTS generation was successful.")
-
-    if st.button("⬅️ Back to Step 3"):
-        st.session_state.step = 3
-        st.rerun()
-
-elif st.session_state.step == 5:
-    st.subheader("Step 5: Download Results")
-    
-    col1, col2 = st.columns(2)
-    with col1:
-        st.success("✅ Dubbing process completed successfully!")
-        if st.session_state.merged_audio_data:
+    # Download Section (Visible if results exist)
+    if st.session_state.merged_audio_data:
+        st.divider()
+        st.subheader("📥 Download Results")
+        col1, col2 = st.columns(2)
+        with col1:
             st.audio(st.session_state.merged_audio_data, format="audio/mp3")
             st.download_button(
-                label="⬇️ Download Final Audio (MP3)",
+                label="⬇️ Download Audio (MP3)",
                 data=st.session_state.merged_audio_data,
                 file_name="dubbed_audio.mp3",
                 mime="audio/mpeg",
                 use_container_width=True
             )
-    
-    with col2:
-        if st.session_state.generated_srt_content:
-            st.download_button(
-                label="⬇️ Download Adjusted SRT",
-                data=st.session_state.generated_srt_content,
-                file_name="dubbed_subtitles.srt",
-                mime="text/plain",
-                use_container_width=True
-            )
-            with st.expander("View Adjusted SRT"):
-                st.code(st.session_state.generated_srt_content, language="srt")
+        with col2:
+            if st.session_state.generated_srt_content:
+                st.download_button(
+                    label="⬇️ Download Adjusted SRT",
+                    data=st.session_state.generated_srt_content,
+                    file_name="dubbed_subtitles.srt",
+                    mime="text/plain",
+                    use_container_width=True
+                )
 
     if st.button("🔄 Start New Project"):
         for key in list(st.session_state.keys()):
