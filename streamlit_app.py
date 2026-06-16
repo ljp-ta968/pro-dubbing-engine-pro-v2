@@ -21,6 +21,8 @@ if 'step' not in st.session_state:
     st.session_state.step = 1
 if 'script_content' not in st.session_state:
     st.session_state.script_content = ""
+if 'translated_script' not in st.session_state:
+    st.session_state.translated_script = ""
 if 'final_srt' not in st.session_state:
     st.session_state.final_srt = ""
 if 'segments' not in st.session_state:
@@ -76,7 +78,7 @@ engine = ProDubbingEngine(api_keys=api_keys if api_keys else [])
 
 # Main UI Logic
 if st.session_state.step == 1:
-    st.subheader("Step 1: SRT Preparation & Language Selection")
+    st.subheader("Step 1: Input & Translation Preview")
     
     col1, col2 = st.columns(2)
     with col1:
@@ -91,7 +93,6 @@ if st.session_state.step == 1:
                 st.session_state.script_content = uploaded_file.read().decode("utf-8")
                 st.success(f"File '{uploaded_file.name}' loaded!")
 
-    with col2:
         lang_options = {
             "Myanmar (Burmese)": "my",
             "English": "en",
@@ -103,18 +104,39 @@ if st.session_state.step == 1:
         selected_lang_name = st.selectbox("Select Output Language:", list(lang_options.keys()), index=0)
         st.session_state.selected_lang = lang_options[selected_lang_name]
 
-        st.info("In this step, the engine will convert your input into a professional SRT format using AI if needed.")
-        
-        if st.button("Generate SRT ➡️", use_container_width=True):
+        if st.button("🔍 1. Preview Translation", use_container_width=True):
             if not st.session_state.script_content:
                 st.error("Please provide input text or file.")
             else:
-                with st.spinner("Converting to SRT..."):
+                with st.spinner("AI is translating and formatting..."):
+                    async def get_preview():
+                        # Use the AI to translate and format, but keep it as a script for editing
+                        prompt = f"Translate the following script to {selected_lang_name} while keeping the [HH:MM:SS] timestamps. Return only the translated script."
+                        return await engine._get_next_client().generate_content_async(f"{prompt}\n\n{st.session_state.script_content}")
+                    
+                    try:
+                        response = asyncio.run(get_preview())
+                        st.session_state.translated_script = response.text
+                    except Exception as e:
+                        st.error(f"AI Error: {str(e)}")
+
+    with col2:
+        st.write("**Review & Edit Translation:**")
+        st.session_state.translated_script = st.text_area("You can manually edit the translation here before generating SRT:", 
+                                                        value=st.session_state.translated_script, 
+                                                        height=450)
+        
+        if st.button("🚀 2. Finalize & Generate SRT ➡️", use_container_width=True):
+            if not st.session_state.translated_script:
+                st.error("Please preview and review translation first.")
+            else:
+                with st.spinner("Converting to Professional SRT..."):
                     async def convert_srt():
-                        if "[00:" in st.session_state.script_content and "-->" not in st.session_state.script_content:
-                            return await engine.text_to_srt_with_ai(st.session_state.script_content)
+                        # Final conversion to valid SRT format
+                        if "[00:" in st.session_state.translated_script and "-->" not in st.session_state.translated_script:
+                            return await engine.text_to_srt_with_ai(st.session_state.translated_script)
                         else:
-                            return st.session_state.script_content
+                            return st.session_state.translated_script
                     
                     st.session_state.final_srt = asyncio.run(convert_srt())
                     st.session_state.segments = engine.parse_srt(st.session_state.final_srt)
@@ -126,7 +148,7 @@ elif st.session_state.step == 2:
     
     st.write(f"✅ Found **{len(st.session_state.segments)}** segments in SRT.")
     
-    with st.expander("Preview SRT Content"):
+    with st.expander("Preview Final SRT Content"):
         st.code(st.session_state.final_srt, language="srt")
 
     st.info("This step will group short segments into full sentences to improve AI rewriting and natural speech flow.")
