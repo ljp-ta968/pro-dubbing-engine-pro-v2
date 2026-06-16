@@ -77,7 +77,14 @@ with st.sidebar:
         status_container.markdown(status_text)
 
 # Initialize engine
-engine = ProDubbingEngine(api_keys=api_keys if api_keys else [])
+if 'engine' not in st.session_state:
+    st.session_state.engine = ProDubbingEngine(api_keys=api_keys if api_keys else [])
+engine = st.session_state.engine
+
+# Update engine api keys if they change
+if api_keys:
+    engine.api_keys = api_keys
+    engine.key_usage = {key: [] for key in api_keys}
 
 # Main UI Logic
 if st.session_state.step == 1:
@@ -121,7 +128,7 @@ if st.session_state.step == 1:
                         lines = [re.sub(r'\[.*?\]', '', l).strip() for l in st.session_state.script_content.split('\n') if l.strip()]
                         clean_text = "\n".join(lines)
                         
-                        async for chunk in engine.translate_streaming(clean_text, selected_lang_name):
+                        async for chunk in engine.translate_streaming(clean_text, st.session_state.selected_lang):
                             st.session_state.translated_script += chunk
                             # Update UI in real-time
                             placeholder.markdown(f"**Live Preview:**\n\n{st.session_state.translated_script}")
