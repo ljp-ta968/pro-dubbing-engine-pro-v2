@@ -87,11 +87,7 @@ class ProDubbingEngine:
                         # Key is available
                         self.key_usage[key].append(now)
                         client = genai.Client(api_key=key)
-                        config = types.GenerateContentConfig(
-                            max_output_tokens=5000,
-                            temperature=0.7
-                        )
-                        return client, config
+                        return client
             
             # All keys are at limit, wait a bit and loop
             print("All API keys are at rate limit. Waiting 5 seconds...")
@@ -214,6 +210,16 @@ class ProDubbingEngine:
         input_lines = [l.strip() for l in text.strip().split('\n') if l.strip()]
         numbered_input = "\n".join([f"L{i+1}: {line}" for i, line in enumerate(input_lines)])
         
+        # Dynamic Token Calculation
+        # Rule: Word count * 12, clamped between 10,000 and 65,536
+        word_count = len(text.split())
+        dynamic_tokens = max(10000, min(65536, word_count * 12))
+        
+        config = types.GenerateContentConfig(
+            max_output_tokens=dynamic_tokens,
+            temperature=0.7
+        )
+        
         prompt = f"""Translate the following numbered lines to {target_lang}. 
         Strictly follow these rules:
         1. Maintain the exact same number of lines.
@@ -223,7 +229,7 @@ class ProDubbingEngine:
         """
         
         for attempt in range(max_retries):
-            client, config = await self._get_next_client()
+            client = await self._get_next_client()
             if not client:
                 return "Error: No API keys."
 
@@ -239,8 +245,9 @@ class ProDubbingEngine:
                 # Parse the numbered output back into clean lines
                 output_lines = []
                 for i in range(len(input_lines)):
-                    # Look for L{i+1}: pattern
-                    pattern = rf"L{i+1}:(.*?)(?=L{i+2}:|$)"
+                    # Robust Regex to handle variations like L1:, L1 -, L1.
+                    # Look for L{i+1} followed by common separators
+                    pattern = rf"L{i+1}[:\-\.\s]+(.*?)(?=L{i+2}[:\-\.\s]+|$)"
                     match = re.search(pattern, translated_raw, re.DOTALL)
                     if match:
                         output_lines.append(match.group(1).strip())
@@ -300,8 +307,12 @@ class ProDubbingEngine:
             Original text: {original_text}
             Rewritten text:
             """
+        config = types.GenerateContentConfig(
+            max_output_tokens=5000, # Fixed size for short rewrites
+            temperature=0.7
+        )
         for attempt in range(max_retries):
-            client, config = await self._get_next_client()
+            client = await self._get_next_client()
             if not client:
                 return original_text
 
