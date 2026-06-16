@@ -35,6 +35,8 @@ if 'merged_audio_data' not in st.session_state:
     st.session_state.merged_audio_data = None
 if 'generated_srt_content' not in st.session_state:
     st.session_state.generated_srt_content = ""
+if 'selected_lang' not in st.session_state:
+    st.session_state.selected_lang = "my"
 
 # Try to get API keys from secrets
 secret_api_keys = st.secrets.get("GEMINI_API_KEYS", [])
@@ -99,10 +101,7 @@ if st.session_state.step == 1:
             "Vietnamese": "vi"
         }
         selected_lang_name = st.selectbox("Select Output Language:", list(lang_options.keys()), index=0)
-        engine.output_language = lang_options[selected_lang_name]
-        
-        selected_gender = st.selectbox("Select Voice Gender:", ["Male", "Female"], index=0)
-        engine.voice_gender = selected_gender
+        st.session_state.selected_lang = lang_options[selected_lang_name]
 
         st.info("In this step, the engine will convert your input into a professional SRT format using AI if needed.")
         
@@ -146,15 +145,23 @@ elif st.session_state.step == 3:
     
     st.write(f"✅ Grouped into **{len(st.session_state.sentences)}** sentences.")
     
-    max_chunks_limit = 10
-    num_chunks = st.slider(
-        "Select Number of Parallel Workers:", 
-        min_value=1, 
-        max_value=min(len(st.session_state.sentences), max_chunks_limit), 
-        value=min(len(st.session_state.sentences), 5)
-    )
+    col_v, col_w = st.columns(2)
+    with col_v:
+        selected_gender = st.selectbox("Select Voice Gender:", ["Male", "Female"], index=0)
+    with col_w:
+        max_chunks_limit = 10
+        num_chunks = st.slider(
+            "Select Number of Parallel Workers:", 
+            min_value=1, 
+            max_value=min(len(st.session_state.sentences), max_chunks_limit), 
+            value=min(len(st.session_state.sentences), 5)
+        )
 
     if st.button("🚀 Start Parallel Professional Dubbing", use_container_width=True):
+        # Set engine parameters before starting
+        engine.output_language = st.session_state.selected_lang
+        engine.voice_gender = selected_gender
+        
         start_time = time.time()
         timer_placeholder = st.empty()
         
