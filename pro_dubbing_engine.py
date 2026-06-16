@@ -88,8 +88,8 @@ class ProDubbingEngine:
                         self.key_usage[key].append(now)
                         client = genai.Client(api_key=key)
                         config = types.GenerateContentConfig(
-                            max_output_tokens=8192, # Reduced for faster response
-                            temperature=0.1 # Lower temperature for more consistent/faster output
+                            max_output_tokens=65536,
+                            temperature=0.7
                         )
                         return client, config
             
