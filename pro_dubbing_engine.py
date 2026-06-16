@@ -7,7 +7,7 @@ Supports multiple voices (Male/Female), parallel workers, and audio merging.
 import re
 import asyncio
 import edge_tts
-from typing import List, Dict, Tuple, Optional
+from typing import List, Dict, Optional, Union
 import os
 import json
 import time
