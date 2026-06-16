@@ -242,10 +242,9 @@ class ProDubbingEngine:
         return "\n\n".join(srt_out) + "\n"
 
     async def _rewrite_text_with_ai(self, original_text: str, target_duration: float, current_tts_duration: float, lang: str) -> str:
-        """Use Gemini AI to rewrite text to better fit target duration."""
-        client, config = await self._get_next_client()
-        if not client:
-            return original_text
+        """Use Gemini AI to rewrite text to better fit target duration with Retry logic."""
+        max_retries = 3
+        retry_delay = 2
 
         duration_diff = current_tts_duration - target_duration
         if duration_diff > 0: # TTS is too long, need to shorten text
@@ -264,21 +263,34 @@ class ProDubbingEngine:
             Original text: {original_text}
             Rewritten text:
             """
-        try:
-            response = await asyncio.to_thread(
-                client.models.generate_content,
-                model='gemini-3.5-flash',
-                contents=prompt,
-                config=config
-            )
-            rewritten_text = response.text.strip()
-            # Basic cleanup of potential AI conversational filler
-            if rewritten_text.lower().startswith("rewritten text:"):
-                rewritten_text = rewritten_text[len("rewritten text:"):].strip()
-            return rewritten_text
-        except Exception as e:
-            print(f"AI rewrite failed: {e}")
-            return original_text
+        for attempt in range(max_retries):
+            client, config = await self._get_next_client()
+            if not client:
+                return original_text
+
+            try:
+                response = await asyncio.to_thread(
+                    client.models.generate_content,
+                    model='gemini-3.5-flash',
+                    contents=prompt,
+                    config=config
+                )
+                rewritten_text = response.text.strip()
+                # Basic cleanup of potential AI conversational filler
+                if rewritten_text.lower().startswith("rewritten text:"):
+                    rewritten_text = rewritten_text[len("rewritten text:"):].strip()
+                return rewritten_text
+            except Exception as e:
+                error_msg = str(e)
+                if "503" in error_msg or "UNAVAILABLE" in error_msg:
+                    if attempt < max_retries - 1:
+                        wait_time = retry_delay * (2 ** attempt)
+                        print(f"Server 503 error in rewrite. Retrying in {wait_time}s... (Attempt {attempt + 1}/{max_retries})")
+                        await asyncio.sleep(wait_time)
+                        continue
+                print(f"AI rewrite failed: {error_msg}")
+                return original_text
+        return original_text
 
     async def generate_tts_for_sentence(self, sentence: DubbingSentence, output_dir: str, status_callback=None) -> bool:
         """Generate TTS for a full sentence with iterative text rewriting and speed adjustment."""
