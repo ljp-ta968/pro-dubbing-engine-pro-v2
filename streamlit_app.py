@@ -17,7 +17,7 @@ nest_asyncio.apply()
 
 st.set_page_config(page_title="Pro Dubbing Engine V2", page_icon="🎙️", layout="wide")
 
-st.title("🎙️ Pro Dubbing Engine - Optimized Workflow")
+st.title("🎙️ Pro Dubbing Engine - Professional Workflow")
 st.markdown("---")
 
 # Initialize Session State
@@ -31,8 +31,6 @@ if 'final_srt' not in st.session_state:
     st.session_state.final_srt = ""
 if 'segments' not in st.session_state:
     st.session_state.segments = []
-if 'sentences' not in st.session_state:
-    st.session_state.sentences = []
 if 'worker_statuses' not in st.session_state:
     st.session_state.worker_statuses = {}
 if 'results' not in st.session_state:
@@ -45,6 +43,16 @@ if 'selected_lang' not in st.session_state:
     st.session_state.selected_lang = "my"
 if 'timers' not in st.session_state:
     st.session_state.timers = {}
+if 'logs' not in st.session_state:
+    st.session_state.logs = []
+
+# Function to add logs
+def add_log(message):
+    timestamp = time.strftime("%H:%M:%S")
+    st.session_state.logs.append(f"[{timestamp}] {message}")
+    # Limit logs to last 50
+    if len(st.session_state.logs) > 50:
+        st.session_state.logs.pop(0)
 
 # Try to get API keys from secrets
 secret_api_keys = st.secrets.get("GEMINI_API_KEYS", [])
@@ -58,18 +66,23 @@ with st.sidebar:
     st.header("⚙️ Settings")
     
     if secret_api_keys:
-        st.success(f"✅ {len(secret_api_keys)} API Keys loaded from Secrets")
+        st.success(f"✅ {len(secret_api_keys)} API Keys loaded")
         api_keys_input = ",".join(secret_api_keys)
     else:
-        api_keys_input = st.text_area("Gemini API Keys (Comma separated)", help="Paste multiple API keys separated by commas for rotation support.")
+        api_keys_input = st.text_area("Gemini API Keys (Comma separated)")
     
     api_keys = [k.strip() for k in api_keys_input.split(",") if k.strip()]
     
-    st.info("💡 Multi-API Support: Using multiple keys helps avoid rate limits.")
-
-    # Sidebar Status Box
     st.divider()
-    st.subheader("📊 Worker Status Log")
+    st.subheader("📊 Detailed Logs")
+    log_container = st.empty()
+    
+    def refresh_logs():
+        log_text = "\n".join(st.session_state.logs[::-1])
+        log_container.code(log_text, language="text")
+
+    st.divider()
+    st.subheader("👷 Worker Status")
     status_container = st.empty()
     
     def update_status(worker_id, message):
@@ -80,18 +93,16 @@ with st.sidebar:
         status_container.markdown(status_text)
 
 # Initialize engine
-if 'engine' not in st.session_state or not hasattr(st.session_state.engine, 'translate_streaming'):
+if 'engine' not in st.session_state or not hasattr(st.session_state.engine, 'translate_batch'):
     st.session_state.engine = ProDubbingEngine(api_keys=api_keys if api_keys else [])
 engine = st.session_state.engine
 
-# Update engine api keys if they change
 if api_keys:
     engine.api_keys = api_keys
-    engine.key_usage = {key: [] for key in api_keys}
 
 # Main UI Logic
 if st.session_state.step == 1:
-    st.subheader("Step 1: Input & Streaming Translation")
+    st.subheader("Step 1: Input & Batch Translation")
     
     col1, col2 = st.columns(2)
     with col1:
@@ -104,7 +115,7 @@ if st.session_state.step == 1:
             uploaded_file = st.file_uploader("Upload .srt or .txt file", type=["srt", "txt"])
             if uploaded_file:
                 st.session_state.script_content = uploaded_file.read().decode("utf-8")
-                st.success(f"File '{uploaded_file.name}' loaded!")
+                add_log(f"File '{uploaded_file.name}' uploaded.")
 
         lang_options = {
             "Myanmar (Burmese)": "my",
@@ -117,35 +128,26 @@ if st.session_state.step == 1:
         selected_lang_name = st.selectbox("Select Output Language:", list(lang_options.keys()), index=0)
         st.session_state.selected_lang = lang_options[selected_lang_name]
 
-        if st.button("🔍 1. Start Streaming Translation", use_container_width=True):
+        if st.button("🔍 1. Start Translation", use_container_width=True):
             if not st.session_state.script_content:
                 st.error("Please provide input text or file.")
             else:
-                st.session_state.translated_script = ""
-                placeholder = st.empty()
-                
+                add_log(f"Starting translation to {selected_lang_name}...")
                 start_time = time.time()
-                with st.spinner("AI is translating in Streaming Mode..."):
-                    async def run_streaming():
-                        # Extract text without timestamps for translation
-                        lines = [re.sub(r'\[.*?\]', '', l).strip() for l in st.session_state.script_content.split('\n') if l.strip()]
-                        clean_text = "\n".join(lines)
-                        
-                        async for chunk in engine.translate_streaming(clean_text, st.session_state.selected_lang):
-                            st.session_state.translated_script += chunk
-                            # Update UI in real-time
-                            placeholder.markdown(f"**Live Preview:**\n\n{st.session_state.translated_script}")
+                with st.spinner("AI is translating..."):
+                    # Extract text without timestamps
+                    lines = [re.sub(r'\[.*?\]', '', l).strip() for l in st.session_state.script_content.split('\n') if l.strip()]
+                    clean_text = "\n".join(lines)
                     
-                    try:
-                        asyncio.run(run_streaming())
-                        st.session_state.timers['step1'] = time.time() - start_time
-                        st.success(f"✅ Translation completed in {st.session_state.timers['step1']:.2f}s")
-                    except Exception as e:
-                        st.error(f"AI Error: {str(e)}")
+                    translated = asyncio.run(engine.translate_batch(clean_text, selected_lang_name))
+                    st.session_state.translated_script = translated
+                    st.session_state.timers['step1'] = time.time() - start_time
+                    add_log(f"Translation completed in {st.session_state.timers['step1']:.2f}s")
+                    refresh_logs()
 
     with col2:
-        st.write("**Review & Edit Translation (One line per segment):**")
-        st.session_state.translated_script = st.text_area("Final Translated Text:", 
+        st.write("**Translation Output:**")
+        st.session_state.translated_script = st.text_area("Review Translated Text:", 
                                                         value=st.session_state.translated_script, 
                                                         height=450)
         
@@ -153,41 +155,41 @@ if st.session_state.step == 1:
             if not st.session_state.translated_script:
                 st.error("Please translate first.")
             else:
+                add_log("Reconstructing SRT with original timestamps...")
                 start_time = time.time()
-                # Two-step process: Reconstruct SRT using original timestamps
-                # First, parse original to get timestamps
-                original_segments = engine.parse_srt(st.session_state.script_content) if "-->" in st.session_state.script_content else []
-                if not original_segments:
-                    # Fallback for bracket timestamps
+                # Parse original to get timestamps
+                original_segments = engine.parse_srt(st.session_state.script_content)
+                if not original_segments and "[" in st.session_state.script_content:
+                    # Handle bracket format
                     lines = [l.strip() for l in st.session_state.script_content.split('\n') if l.strip()]
                     for i, line in enumerate(lines):
                         match = re.search(r'\[?(\d{2}:\d{2}:\d{2})\]?', line)
                         if match:
                             start_s = engine._time_to_seconds(match.group(1))
-                            # Estimate end time if not available
                             end_s = start_s + 3.0 
-                            original_segments.append(engine.DubbingSegment(start_s, end_s, "en", line, i))
+                            original_segments.append(pro_dubbing_engine.DubbingSegment(start_s, end_s, "en", line, i))
 
                 st.session_state.final_srt = engine.reconstruct_srt_with_translation(original_segments, st.session_state.translated_script)
                 st.session_state.segments = engine.parse_srt(st.session_state.final_srt)
                 st.session_state.timers['step1_reconstruct'] = time.time() - start_time
+                add_log(f"SRT Reconstructed in {st.session_state.timers['step1_reconstruct']:.2f}s")
                 st.session_state.step = 2
                 st.rerun()
 
 elif st.session_state.step == 2:
-    st.subheader("Step 2: Sentence Grouping & Timing Preview")
+    st.subheader("Step 2: Preview & Grouping")
     
-    st.write(f"✅ Reconstructed **{len(st.session_state.segments)}** segments with original timestamps.")
-    if 'step1' in st.session_state.timers:
-        st.info(f"⏱️ Translation Time: {st.session_state.timers['step1']:.2f}s | Reconstruct Time: {st.session_state.timers['step1_reconstruct']:.2f}s")
+    st.info(f"⏱️ Translation: {st.session_state.timers.get('step1', 0):.2f}s | Reconstruct: {st.session_state.timers.get('step1_reconstruct', 0):.2f}s")
     
-    with st.expander("Preview Reconstructed SRT (Original Timestamps Preserved)"):
-        st.code(st.session_state.final_srt, language="srt")
+    st.write("**Standard SRT Preview (Original Timestamps Preserved):**")
+    st.code(st.session_state.final_srt, language="srt")
 
-    if st.button("Group into Sentences ➡️", use_container_width=True):
+    if st.button("Confirm & Group into Sentences ➡️", use_container_width=True):
+        add_log("Grouping segments into sentences...")
         start_time = time.time()
         st.session_state.sentences = engine.group_segments_into_sentences(st.session_state.segments)
         st.session_state.timers['step2_grouping'] = time.time() - start_time
+        add_log(f"Grouped into {len(st.session_state.sentences)} sentences in {st.session_state.timers['step2_grouping']:.2f}s")
         st.session_state.step = 3
         st.rerun()
     
@@ -198,9 +200,7 @@ elif st.session_state.step == 2:
 elif st.session_state.step == 3:
     st.subheader("Step 3: Professional Dubbing")
     
-    st.write(f"✅ Grouped into **{len(st.session_state.sentences)}** sentences.")
-    if 'step2_grouping' in st.session_state.timers:
-        st.info(f"⏱️ Grouping Time: {st.session_state.timers['step2_grouping']:.2f}s")
+    st.info(f"⏱️ Grouping Time: {st.session_state.timers.get('step2_grouping', 0):.2f}s")
     
     col_v, col_w = st.columns(2)
     with col_v:
@@ -212,10 +212,10 @@ elif st.session_state.step == 3:
         engine.output_language = st.session_state.selected_lang
         engine.voice_gender = selected_gender
         
+        add_log(f"Starting Dubbing with {num_chunks} workers...")
         start_time = time.time()
-        timer_placeholder = st.empty()
         
-        with st.spinner("Processing TTS..."):
+        with st.spinner("Generating TTS & Merging..."):
             async def main_workflow():
                 st.session_state.worker_statuses = {i+1: "Idle" for i in range(num_chunks)}
                 update_status(0, "")
@@ -223,21 +223,25 @@ elif st.session_state.step == 3:
                 with tempfile.TemporaryDirectory() as tmp_dir:
                     def ui_callback(worker_id, msg):
                         update_status(worker_id, msg)
+                        add_log(f"Worker {worker_id}: {msg}")
 
                     results = await engine.process_workflow_parallel(st.session_state.segments, num_chunks, tmp_dir, status_callback=ui_callback)
                     st.session_state.results = results
 
-                    # Merge Audio
+                    add_log("Merging audio files...")
                     merged_audio_path = os.path.join(tmp_dir, "dubbed_audio.mp3")
                     if engine.merge_audio_files(st.session_state.segments, merged_audio_path):
                         with open(merged_audio_path, "rb") as f:
                             st.session_state.merged_audio_data = f.read()
                         st.session_state.generated_srt_content = engine.generate_srt_content(st.session_state.segments)
+                        add_log("Audio merging completed.")
                     
                     st.session_state.timers['step3_total'] = time.time() - start_time
+                    add_log(f"Dubbing process finished in {st.session_state.timers['step3_total']:.2f}s")
 
             asyncio.run(main_workflow())
             st.success(f"✅ Completed in {st.session_state.timers['step3_total']:.2f}s")
+            refresh_logs()
 
     if st.button("⬅️ Back to Step 2"):
         st.session_state.step = 2
@@ -257,3 +261,6 @@ elif st.session_state.step == 3:
         for key in list(st.session_state.keys()):
             del st.session_state[key]
         st.rerun()
+
+# Initial log refresh
+refresh_logs()

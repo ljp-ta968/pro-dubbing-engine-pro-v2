@@ -7,7 +7,7 @@ Supports multiple voices (Male/Female), parallel workers, and audio merging.
 import re
 import asyncio
 import edge_tts
-from typing import List, Dict, Tuple, Optional, AsyncGenerator
+from typing import List, Dict, Tuple, Optional
 import os
 import json
 import time
@@ -165,13 +165,14 @@ class ProDubbingEngine:
     def parse_srt(self, srt_content: str) -> List[DubbingSegment]:
         """Parse SRT content into DubbingSegments"""
         segments = []
-        pattern = r'(\d+)\s+(\d{2}:\d{2}:\d{2}[,. ]\d{3})\s+-->\s+(\d{2}:\d{2}:\d{2}[,. ]\d{3})\s+(.*?)(?=\n\n|\n\d+\n|$)'
+        # Support various SRT formats and line endings
+        pattern = r'(\d+)\s+(\d{2}:\d{2}:\d{2}[,. ]\d{3})\s+-->\s+(\d{2}:\d{2}:\d{2}[,. ]\d{3})\s+(.*?)(?=\n\n|\r\n\r\n|\n\d+\n|\r\n\d+\r\n|$)'
         matches = re.finditer(pattern, srt_content, re.DOTALL)
         
         for i, match in enumerate(matches):
             start_s = self._time_to_seconds(match.group(2))
             end_s = self._time_to_seconds(match.group(3))
-            text = match.group(4).replace('\n', ' ').strip()
+            text = match.group(4).replace('\n', ' ').replace('\r', '').strip()
             
             segments.append(DubbingSegment(
                 start=start_s,
@@ -204,44 +205,36 @@ class ProDubbingEngine:
                 
         return sentences
 
-    async def translate_streaming(self, text: str, target_lang: str) -> AsyncGenerator[str, None]:
-        """Translate text using Gemini with Streaming Mode."""
+    async def translate_batch(self, text: str, target_lang: str) -> str:
+        """Translate text using Gemini in batch mode (Standard)."""
         client, config = await self._get_next_client()
         if not client:
-            yield "Error: No API keys."
-            return
+            return "Error: No API keys."
 
-        prompt = f"Translate the following text to {target_lang}. Return ONLY the translated text. Do not include original timestamps or any formatting. Just the translation."
+        prompt = f"Translate the following text to {target_lang}. Return ONLY the translated text. Maintain the same number of lines as the input. Do not include original timestamps or any formatting. Just the translation line by line."
         
         try:
-            # Use generate_content_stream for streaming
-            response_stream = client.models.generate_content_stream(
+            response = await asyncio.to_thread(
+                client.models.generate_content,
                 model='gemini-3.5-flash',
                 contents=f"{prompt}\n\n{text}",
                 config=config
             )
-            for chunk in response_stream:
-                if chunk.text:
-                    yield chunk.text
+            return response.text.strip()
         except Exception as e:
-            yield f"Error: {str(e)}"
+            return f"Error: {str(e)}"
 
     def reconstruct_srt_with_translation(self, original_segments: List[DubbingSegment], translated_text: str) -> str:
         """Reconstruct SRT using original timestamps and translated text lines."""
         # Split translated text into lines, matching the number of original segments
         translated_lines = [l.strip() for l in translated_text.strip().split('\n') if l.strip()]
         
-        # If mismatch, try to split by punctuation or just distribute
-        if len(translated_lines) != len(original_segments):
-            # Fallback: Just use simple splitting if lines don't match
-            # This is a basic implementation, can be improved with more complex logic
-            pass
-
         srt_out = []
         for i, seg in enumerate(original_segments):
             text = translated_lines[i] if i < len(translated_lines) else seg.text
             start_t = self._seconds_to_time(seg.start)
             end_t = self._seconds_to_time(seg.end)
+            # Standard SRT format with proper spacing
             srt_out.append(f"{i+1}\n{start_t} --> {end_t}\n{text}\n")
         
         return "\n".join(srt_out)
@@ -289,7 +282,7 @@ class ProDubbingEngine:
         """Generate TTS for a full sentence with iterative text rewriting and speed adjustment."""
         target_duration = sentence.duration
         sentence.retries = 0
-        max_ai_retries = 3 # Reduced retries for faster processing
+        max_ai_retries = 3 
 
         while True:
             try:
@@ -352,8 +345,6 @@ class ProDubbingEngine:
         # Distribute sentence results back to segments
         for sentence in sentences:
             if sentence.tts_audio_path:
-                # For simplicity, we just assign the sentence audio to segments
-                # A more complex version would split the sentence audio back to segments
                 for seg in sentence.segments:
                     seg.tts_audio_path = sentence.tts_audio_path
                     seg.status = "completed"
@@ -377,7 +368,6 @@ class ProDubbingEngine:
             total_duration_ms = int(segments[-1].end * 1000)
             combined = AudioSegment.silent(duration=total_duration_ms)
             
-            # Keep track of processed sentences to avoid double-pasting
             processed_sentences = set()
             
             for seg in segments:
@@ -386,9 +376,7 @@ class ProDubbingEngine:
                 
                 if seg.tts_audio_path and os.path.exists(seg.tts_audio_path):
                     audio = AudioSegment.from_file(seg.tts_audio_path)
-                    # Find the sentence start time
-                    # We need to find the first segment of this sentence
-                    sentence_start_ms = int(seg.start * 1000) # Simplified
+                    sentence_start_ms = int(seg.start * 1000)
                     combined = combined.overlay(audio, position=sentence_start_ms)
                     processed_sentences.add(seg.sentence_id)
             
