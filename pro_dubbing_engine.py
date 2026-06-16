@@ -62,7 +62,7 @@ class ProDubbingEngine:
         
         # Rate limiting state: {key: [timestamp1, timestamp2, ...]}
         self.key_usage = {key: [] for key in self.api_keys}
-        self.max_rpm = 15 # Increased RPM for faster processing
+        self.max_rpm = 9 # Conservative limit to avoid rate limiting issues
         
         self._initialize_voice_map()
 
