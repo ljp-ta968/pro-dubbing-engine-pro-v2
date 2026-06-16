@@ -50,9 +50,17 @@ if 'logs' not in st.session_state:
 def add_log(message):
     timestamp = time.strftime("%H:%M:%S")
     st.session_state.logs.append(f"[{timestamp}] {message}")
-    # Limit logs to last 50
     if len(st.session_state.logs) > 50:
         st.session_state.logs.pop(0)
+
+# Real-time Timer Functionality
+def start_live_timer(placeholder, label):
+    start_time = time.time()
+    while st.session_state.get('is_running', False):
+        elapsed = time.time() - start_time
+        placeholder.markdown(f"**⏱️ {label}:** `{elapsed:.2f}s`")
+        time.sleep(0.1)
+    return time.time() - start_time
 
 # Try to get API keys from secrets
 secret_api_keys = st.secrets.get("GEMINI_API_KEYS", [])
@@ -128,21 +136,36 @@ if st.session_state.step == 1:
         selected_lang_name = st.selectbox("Select Output Language:", list(lang_options.keys()), index=0)
         st.session_state.selected_lang = lang_options[selected_lang_name]
 
+        timer_placeholder = st.empty()
         if st.button("🔍 1. Start Translation", use_container_width=True):
             if not st.session_state.script_content:
                 st.error("Please provide input text or file.")
             else:
                 add_log(f"Starting translation to {selected_lang_name}...")
-                start_time = time.time()
+                st.session_state.is_running = True
+                
+                # Use threading for live timer while async task runs
+                import threading
+                def timer_thread():
+                    start_t = time.time()
+                    while st.session_state.get('is_running', False):
+                        elapsed = time.time() - start_t
+                        timer_placeholder.markdown(f"**⏱️ Translation Timer:** `{elapsed:.2f}s`")
+                        time.sleep(0.1)
+
+                t = threading.Thread(target=timer_thread)
+                t.start()
+
                 with st.spinner("AI is translating..."):
-                    # Extract text without timestamps
                     lines = [re.sub(r'\[.*?\]', '', l).strip() for l in st.session_state.script_content.split('\n') if l.strip()]
                     clean_text = "\n".join(lines)
                     
                     translated = asyncio.run(engine.translate_batch(clean_text, selected_lang_name))
                     st.session_state.translated_script = translated
-                    st.session_state.timers['step1'] = time.time() - start_time
-                    add_log(f"Translation completed in {st.session_state.timers['step1']:.2f}s")
+                    st.session_state.is_running = False
+                    t.join()
+                    
+                    add_log(f"Translation completed.")
                     refresh_logs()
 
     with col2:
@@ -151,16 +174,27 @@ if st.session_state.step == 1:
                                                         value=st.session_state.translated_script, 
                                                         height=450)
         
+        reconstruct_timer_placeholder = st.empty()
         if st.button("🚀 2. Finalize & Preserve Timestamps ➡️", use_container_width=True):
             if not st.session_state.translated_script:
                 st.error("Please translate first.")
             else:
                 add_log("Reconstructing SRT with original timestamps...")
-                start_time = time.time()
+                st.session_state.is_running = True
+                
+                def timer_thread_rec():
+                    start_t = time.time()
+                    while st.session_state.get('is_running', False):
+                        elapsed = time.time() - start_t
+                        reconstruct_timer_placeholder.markdown(f"**⏱️ Reconstruction Timer:** `{elapsed:.2f}s`")
+                        time.sleep(0.1)
+
+                t = threading.Thread(target=timer_thread_rec)
+                t.start()
+
                 # Parse original to get timestamps
                 original_segments = engine.parse_srt(st.session_state.script_content)
                 if not original_segments and "[" in st.session_state.script_content:
-                    # Handle bracket format
                     lines = [l.strip() for l in st.session_state.script_content.split('\n') if l.strip()]
                     for i, line in enumerate(lines):
                         match = re.search(r'\[?(\d{2}:\d{2}:\d{2})\]?', line)
@@ -171,25 +205,42 @@ if st.session_state.step == 1:
 
                 st.session_state.final_srt = engine.reconstruct_srt_with_translation(original_segments, st.session_state.translated_script)
                 st.session_state.segments = engine.parse_srt(st.session_state.final_srt)
-                st.session_state.timers['step1_reconstruct'] = time.time() - start_time
-                add_log(f"SRT Reconstructed in {st.session_state.timers['step1_reconstruct']:.2f}s")
+                
+                st.session_state.is_running = False
+                t.join()
+                
+                add_log(f"SRT Reconstructed.")
                 st.session_state.step = 2
                 st.rerun()
 
 elif st.session_state.step == 2:
     st.subheader("Step 2: Preview & Grouping")
     
-    st.info(f"⏱️ Translation: {st.session_state.timers.get('step1', 0):.2f}s | Reconstruct: {st.session_state.timers.get('step1_reconstruct', 0):.2f}s")
-    
     st.write("**Standard SRT Preview (Original Timestamps Preserved):**")
     st.code(st.session_state.final_srt, language="srt")
 
+    group_timer_placeholder = st.empty()
     if st.button("Confirm & Group into Sentences ➡️", use_container_width=True):
         add_log("Grouping segments into sentences...")
-        start_time = time.time()
+        st.session_state.is_running = True
+        
+        import threading
+        def timer_thread_group():
+            start_t = time.time()
+            while st.session_state.get('is_running', False):
+                elapsed = time.time() - start_t
+                group_timer_placeholder.markdown(f"**⏱️ Grouping Timer:** `{elapsed:.2f}s`")
+                time.sleep(0.1)
+
+        t = threading.Thread(target=timer_thread_group)
+        t.start()
+
         st.session_state.sentences = engine.group_segments_into_sentences(st.session_state.segments)
-        st.session_state.timers['step2_grouping'] = time.time() - start_time
-        add_log(f"Grouped into {len(st.session_state.sentences)} sentences in {st.session_state.timers['step2_grouping']:.2f}s")
+        
+        st.session_state.is_running = False
+        t.join()
+        
+        add_log(f"Grouped into {len(st.session_state.sentences)} sentences.")
         st.session_state.step = 3
         st.rerun()
     
@@ -200,21 +251,31 @@ elif st.session_state.step == 2:
 elif st.session_state.step == 3:
     st.subheader("Step 3: Professional Dubbing")
     
-    st.info(f"⏱️ Grouping Time: {st.session_state.timers.get('step2_grouping', 0):.2f}s")
-    
     col_v, col_w = st.columns(2)
     with col_v:
         selected_gender = st.selectbox("Select Voice Gender:", ["Male", "Female"], index=0)
     with col_w:
         num_chunks = st.slider("Parallel Workers:", 1, 10, 5)
 
+    dub_timer_placeholder = st.empty()
     if st.button("🚀 Start Dubbing Process", use_container_width=True):
         engine.output_language = st.session_state.selected_lang
         engine.voice_gender = selected_gender
         
         add_log(f"Starting Dubbing with {num_chunks} workers...")
-        start_time = time.time()
+        st.session_state.is_running = True
         
+        import threading
+        def timer_thread_dub():
+            start_t = time.time()
+            while st.session_state.get('is_running', False):
+                elapsed = time.time() - start_t
+                dub_timer_placeholder.markdown(f"**⏱️ Dubbing Timer:** `{elapsed:.2f}s`")
+                time.sleep(0.1)
+
+        t = threading.Thread(target=timer_thread_dub)
+        t.start()
+
         with st.spinner("Generating TTS & Merging..."):
             async def main_workflow():
                 st.session_state.worker_statuses = {i+1: "Idle" for i in range(num_chunks)}
@@ -236,11 +297,11 @@ elif st.session_state.step == 3:
                         st.session_state.generated_srt_content = engine.generate_srt_content(st.session_state.segments)
                         add_log("Audio merging completed.")
                     
-                    st.session_state.timers['step3_total'] = time.time() - start_time
-                    add_log(f"Dubbing process finished in {st.session_state.timers['step3_total']:.2f}s")
+                    st.session_state.is_running = False
 
             asyncio.run(main_workflow())
-            st.success(f"✅ Completed in {st.session_state.timers['step3_total']:.2f}s")
+            t.join()
+            st.success(f"✅ Dubbing Completed!")
             refresh_logs()
 
     if st.button("⬅️ Back to Step 2"):

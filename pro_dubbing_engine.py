@@ -234,10 +234,12 @@ class ProDubbingEngine:
             text = translated_lines[i] if i < len(translated_lines) else seg.text
             start_t = self._seconds_to_time(seg.start)
             end_t = self._seconds_to_time(seg.end)
-            # Standard SRT format with proper spacing
-            srt_out.append(f"{i+1}\n{start_t} --> {end_t}\n{text}\n")
+            # Standard SRT format: Index, Time, Text, Blank line
+            srt_block = f"{i+1}\n{start_t} --> {end_t}\n{text}"
+            srt_out.append(srt_block)
         
-        return "\n".join(srt_out)
+        # Join with double newline to ensure standard SRT separation
+        return "\n\n".join(srt_out) + "\n"
 
     async def _rewrite_text_with_ai(self, original_text: str, target_duration: float, current_tts_duration: float, lang: str) -> str:
         """Use Gemini AI to rewrite text to better fit target duration."""
