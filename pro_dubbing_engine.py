@@ -220,13 +220,15 @@ class ProDubbingEngine:
             temperature=0.7
         )
         
-        prompt = f"""Translate the following numbered lines to {target_lang}. 
-        Strictly follow these rules:
-        1. Maintain the exact same number of lines.
-        2. Keep the line markers (L1:, L2:, etc.) in your response.
-        3. Return ONLY the translated numbered lines.
-        4. Do not merge lines or add any conversational text.
-        """
+        prompt = f"""You are a professional translator. Translate the following numbered lines into {target_lang}.
+
+### STRICT RULES:
+1. Your response MUST start directly with 'L1:' followed by the translation.
+2. DO NOT include any introductory text, thinking process, explanations, notes, or concluding remarks.
+3. Maintain the exact line markers (L1:, L2:, etc.) for every single line.
+4. Do not merge lines. Every input line must have exactly one corresponding output line.
+5. Translate all {len(input_lines)} lines without skipping any.
+"""
         
         for attempt in range(max_retries):
             client = await self._get_next_client()
@@ -242,18 +244,32 @@ class ProDubbingEngine:
                 )
                 translated_raw = response.text.strip()
                 
-                # Parse the numbered output back into clean lines
-                output_lines = []
-                for i in range(len(input_lines)):
-                    # Robust Regex to handle variations like L1:, L1 -, L1.
-                    # Look for L{i+1} followed by common separators
-                    pattern = rf"L{i+1}[:\-\.\s]+(.*?)(?=L{i+2}[:\-\.\s]+|$)"
-                    match = re.search(pattern, translated_raw, re.DOTALL)
-                    if match:
-                        output_lines.append(match.group(1).strip())
-                    else:
-                        # Fallback if AI missed a marker
-                        output_lines.append(f"[Line {i+1} Translation Missing]")
+                # Robust Parsing Logic:
+                # 1. AI might repeat blocks or add conversational chatter.
+                # 2. We split by markers and take only the first relevant line of text for each marker.
+                
+                output_lines = [f"[Line {i+1} Translation Missing]" for i in range(len(input_lines))]
+                
+                # Split the raw output by marker patterns (e.g., L1:, L2 -, etc.)
+                parts = re.split(r"(L\d+[:\-\.\s]+)", translated_raw)
+                
+                # parts[0] is text before L1. Subsequent parts are [marker, text, marker, text, ...]
+                for i in range(1, len(parts), 2):
+                    marker_part = parts[i]
+                    text_part = parts[i+1]
+                    
+                    try:
+                        # Extract the line number from the marker (e.g., "L123" -> 123)
+                        line_match = re.search(r"\d+", marker_part)
+                        if line_match:
+                            line_num = int(line_match.group())
+                            if 1 <= line_num <= len(input_lines):
+                                # Take only the first line of the text part to avoid AI chatter/notes
+                                clean_text = text_part.strip().split('\n')[0].strip()
+                                # If AI repeats a line, the latest one in the response will be used
+                                output_lines[line_num - 1] = clean_text
+                    except (ValueError, IndexError):
+                        continue
                 
                 return "\n".join(output_lines)
 
