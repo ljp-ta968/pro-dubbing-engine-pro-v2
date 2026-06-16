@@ -5,6 +5,9 @@ import re
 import shutil
 import json
 import time
+import importlib
+import pro_dubbing_engine
+importlib.reload(pro_dubbing_engine)
 from pro_dubbing_engine import ProDubbingEngine
 import tempfile
 import nest_asyncio
@@ -77,7 +80,7 @@ with st.sidebar:
         status_container.markdown(status_text)
 
 # Initialize engine
-if 'engine' not in st.session_state:
+if 'engine' not in st.session_state or not hasattr(st.session_state.engine, 'translate_streaming'):
     st.session_state.engine = ProDubbingEngine(api_keys=api_keys if api_keys else [])
 engine = st.session_state.engine
 
