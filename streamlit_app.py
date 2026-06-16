@@ -117,7 +117,7 @@ if st.session_state.step == 1:
                         
                         prompt = f"Translate the following script to {selected_lang_name} while keeping the [HH:MM:SS] timestamps. Return only the translated script."
                         response = await client.models.generate_content(
-                            model='gemini-3-flash', # Keeping user's model name
+                            model='gemini-3.5-flash', # Updated to latest model version
                             contents=f"{prompt}\n\n{st.session_state.script_content}",
                             config=config
                         )

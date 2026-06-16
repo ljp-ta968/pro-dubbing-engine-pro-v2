@@ -232,7 +232,7 @@ class ProDubbingEngine:
         try:
             response = await asyncio.to_thread(
                 client.models.generate_content,
-                model='gemini-3-flash',
+                model='gemini-3.5-flash',
                 contents=prompt,
                 config=config
             )
@@ -267,7 +267,7 @@ class ProDubbingEngine:
         try:
             response = await asyncio.to_thread(
                 client.models.generate_content,
-                model='gemini-3-flash',
+                model='gemini-3.5-flash',
                 contents=prompt,
                 config=config
             )
