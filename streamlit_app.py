@@ -115,7 +115,17 @@ if st.session_state.step == 1:
                         if not client:
                             raise Exception("No API keys provided.")
                         
-                        prompt = f"Translate the following script to {selected_lang_name} while keeping the [HH:MM:SS] timestamps. Return only the translated script."
+                        prompt = f"""
+                        Translate the following script to {selected_lang_name}.
+                        
+                        CRITICAL REQUIREMENTS:
+                        1. Output MUST be in professional SRT format (Index, Time Range, Text).
+                        2. Keep the original timing from the timestamps provided.
+                        3. Use standard SRT time format: HH:MM:SS,mmm --> HH:MM:SS,mmm
+                        4. Return ONLY the SRT content. No conversational filler, no explanations.
+                        
+                        INPUT SCRIPT:
+                        """
                         response = client.models.generate_content(
                             model='gemini-3.5-flash', # Updated to latest model version
                             contents=f"{prompt}\n\n{st.session_state.script_content}",
