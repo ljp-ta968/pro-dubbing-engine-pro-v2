@@ -202,19 +202,48 @@ class ProDubbingEngine:
         return sentences
 
     async def translate_batch_parallel(self, text: str, target_lang: str, num_workers: int = 5) -> str:
-        """Translate text in parallel by splitting it into chunks."""
+        """Translate text in parallel by splitting it into chunks, trying to split at sentence ends."""
         input_lines = [l.strip() for l in text.strip().split('\n') if l.strip()]
         if not input_lines:
             return ""
         
-        # Split lines into chunks for parallel processing
-        chunk_size = (len(input_lines) + num_workers - 1) // num_workers
-        chunks = [input_lines[i:i + chunk_size] for i in range(0, len(input_lines), chunk_size)]
+        total_lines = len(input_lines)
+        if num_workers <= 1 or total_lines <= 10:
+            return await self._translate_chunk(input_lines, target_lang, 0, as_string=True)
+            
+        # Sentence-Aware Chunking:
+        # We want to split around total_lines / num_workers, but look for sentence endings (., ?, !)
+        ideal_chunk_size = total_lines // num_workers
+        chunks = []
+        current_chunk = []
         
+        for i, line in enumerate(input_lines):
+            current_chunk.append(line)
+            # If we reached ideal size, check if this line ends a sentence or if it's the last line
+            is_sentence_end = any(line.endswith(p) for p in ['.', '?', '!'])
+            is_last_line = (i == total_lines - 1)
+            
+            # Split if it's a sentence end and we are near or past ideal size, 
+            # or if we are way past ideal size (safety), or if it's the last line.
+            if (len(current_chunk) >= ideal_chunk_size and is_sentence_end) or \
+               (len(current_chunk) >= ideal_chunk_size * 1.5) or \
+               is_last_line:
+                if current_chunk:
+                    chunks.append(current_chunk)
+                    current_chunk = []
+        
+        # If any lines left, add to last chunk
+        if current_chunk:
+            if chunks:
+                chunks[-1].extend(current_chunk)
+            else:
+                chunks.append(current_chunk)
+
         tasks = []
-        for i, chunk in enumerate(chunks):
-            start_line_index = i * chunk_size
-            tasks.append(self._translate_chunk(chunk, target_lang, start_line_index))
+        current_start_index = 0
+        for chunk in chunks:
+            tasks.append(self._translate_chunk(chunk, target_lang, current_start_index))
+            current_start_index += len(chunk)
         
         results = await asyncio.gather(*tasks)
         
@@ -230,7 +259,7 @@ class ProDubbingEngine:
         # Ensure we return exactly the same number of lines as input
         return "\n".join(all_translated_lines[:len(input_lines)])
 
-    async def _translate_chunk(self, lines: List[str], target_lang: str, start_index: int) -> List[str]:
+    async def _translate_chunk(self, lines: List[str], target_lang: str, start_index: int, as_string: bool = False) -> Union[List[str], str]:
         """Helper to translate a specific chunk of lines."""
         max_retries = 3
         retry_delay = 2
@@ -290,7 +319,7 @@ class ProDubbingEngine:
                     except:
                         continue
                 
-                return chunk_output
+                return "\n".join(chunk_output) if as_string else chunk_output
 
             except Exception as e:
                 error_msg = str(e)
@@ -299,12 +328,14 @@ class ProDubbingEngine:
                         wait_time = retry_delay * (2 ** attempt)
                         await asyncio.sleep(wait_time)
                         continue
-                return [f"[Error: {error_msg}]"] * len(lines)
+                err_res = [f"[Error: {error_msg}]"] * len(lines)
+                return "\n".join(err_res) if as_string else err_res
         
-        return [f"[Error: Max retries reached]"] * len(lines)
+        err_res = [f"[Error: Max retries reached]"] * len(lines)
+        return "\n".join(err_res) if as_string else err_res
 
     async def translate_batch(self, text: str, target_lang: str) -> str:
-        """Legacy support for non-parallel translation (redirects to parallel with 1 worker)."""
+        """Legacy support for non-parallel translation."""
         return await self.translate_batch_parallel(text, target_lang, num_workers=1)
 
     def reconstruct_srt_with_translation(self, original_segments: List[DubbingSegment], translated_text: str) -> str:
