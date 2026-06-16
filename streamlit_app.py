@@ -125,6 +125,14 @@ if st.session_state.step == 1:
         }
         selected_lang_name = st.selectbox("Select Output Language:", list(lang_options.keys()), index=0)
         st.session_state.selected_lang = lang_options[selected_lang_name]
+        
+        num_workers = st.slider(
+            "Parallel Translation Workers:",
+            min_value=1,
+            max_value=10,
+            value=5,
+            help="Split text into chunks and translate in parallel. Higher values are faster but use more API quota."
+        )
 
         if st.button("🔍 1. Start Translation", use_container_width=True):
             if not st.session_state.script_content:
@@ -150,8 +158,8 @@ if st.session_state.step == 1:
                 lines = [re.sub(r'\[.*?\]', '', l).strip() for l in st.session_state.script_content.split('\n') if l.strip()]
                 clean_text = "\n".join(lines)
                 
-                # Start the translation task in the background
-                future = executor.submit(run_async_task, engine.translate_batch(clean_text, selected_lang_name))
+                # Start the translation task in the background using the new parallel method
+                future = executor.submit(run_async_task, engine.translate_batch_parallel(clean_text, selected_lang_name, num_workers=num_workers))
                 
                 # While the task is running, update the UI timer
                 while not future.done():

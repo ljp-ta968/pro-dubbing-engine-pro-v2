@@ -201,19 +201,46 @@ class ProDubbingEngine:
                 
         return sentences
 
-    async def translate_batch(self, text: str, target_lang: str) -> str:
-        """Translate text using Gemini in batch mode with Numbered Line System and Retry logic."""
+    async def translate_batch_parallel(self, text: str, target_lang: str, num_workers: int = 5) -> str:
+        """Translate text in parallel by splitting it into chunks."""
+        input_lines = [l.strip() for l in text.strip().split('\n') if l.strip()]
+        if not input_lines:
+            return ""
+        
+        # Split lines into chunks for parallel processing
+        chunk_size = (len(input_lines) + num_workers - 1) // num_workers
+        chunks = [input_lines[i:i + chunk_size] for i in range(0, len(input_lines), chunk_size)]
+        
+        tasks = []
+        for i, chunk in enumerate(chunks):
+            start_line_index = i * chunk_size
+            tasks.append(self._translate_chunk(chunk, target_lang, start_line_index))
+        
+        results = await asyncio.gather(*tasks)
+        
+        # Combine results in order
+        all_translated_lines = []
+        for res in results:
+            if isinstance(res, list):
+                all_translated_lines.extend(res)
+            else:
+                # If a chunk failed, we still need to maintain the line count
+                all_translated_lines.extend([f"[Chunk Error: {res}]"] * chunk_size)
+        
+        # Ensure we return exactly the same number of lines as input
+        return "\n".join(all_translated_lines[:len(input_lines)])
+
+    async def _translate_chunk(self, lines: List[str], target_lang: str, start_index: int) -> List[str]:
+        """Helper to translate a specific chunk of lines."""
         max_retries = 3
         retry_delay = 2
         
-        # Prepare numbered input to force line-by-line translation
-        input_lines = [l.strip() for l in text.strip().split('\n') if l.strip()]
-        numbered_input = "\n".join([f"L{i+1}: {line}" for i, line in enumerate(input_lines)])
+        # Prepare numbered input for this chunk (maintaining global line numbers)
+        numbered_input = "\n".join([f"L{start_index + i + 1}: {line}" for i, line in enumerate(lines)])
         
-        # Dynamic Token Calculation
-        # Rule: Word count * 12, clamped between 10,000 and 65,536
-        word_count = len(text.split())
-        dynamic_tokens = max(10000, min(65536, word_count * 12))
+        # Dynamic Token Calculation for this chunk
+        word_count = sum(len(l.split()) for l in lines)
+        dynamic_tokens = max(5000, min(32768, word_count * 15)) # Slightly higher multiplier for safety
         
         config = types.GenerateContentConfig(
             max_output_tokens=dynamic_tokens,
@@ -223,17 +250,17 @@ class ProDubbingEngine:
         prompt = f"""You are a professional translator. Translate the following numbered lines into {target_lang}.
 
 ### STRICT RULES:
-1. Your response MUST start directly with 'L1:' followed by the translation.
+1. Your response MUST start directly with 'L{start_index + 1}:' followed by the translation.
 2. DO NOT include any introductory text, thinking process, explanations, notes, or concluding remarks.
-3. Maintain the exact line markers (L1:, L2:, etc.) for every single line.
+3. Maintain the exact line markers (L{start_index + 1}:, L{start_index + 2}:, etc.) for every single line.
 4. Do not merge lines. Every input line must have exactly one corresponding output line.
-5. Translate all {len(input_lines)} lines without skipping any.
+5. Translate all {len(lines)} lines without skipping any.
 """
         
         for attempt in range(max_retries):
             client = await self._get_next_client()
             if not client:
-                return "Error: No API keys."
+                return [f"[Error: No API keys]"] * len(lines)
 
             try:
                 response = await asyncio.to_thread(
@@ -244,45 +271,41 @@ class ProDubbingEngine:
                 )
                 translated_raw = response.text.strip()
                 
-                # Robust Parsing Logic:
-                # 1. AI might repeat blocks or add conversational chatter.
-                # 2. We split by markers and take only the first relevant line of text for each marker.
-                
-                output_lines = [f"[Line {i+1} Translation Missing]" for i in range(len(input_lines))]
-                
-                # Split the raw output by marker patterns (e.g., L1:, L2 -, etc.)
+                # Robust Parsing for this chunk
+                chunk_output = [f"[Line {start_index + i + 1} Translation Missing]" for i in range(len(lines))]
                 parts = re.split(r"(L\d+[:\-\.\s]+)", translated_raw)
                 
-                # parts[0] is text before L1. Subsequent parts are [marker, text, marker, text, ...]
                 for i in range(1, len(parts), 2):
                     marker_part = parts[i]
                     text_part = parts[i+1]
                     
                     try:
-                        # Extract the line number from the marker (e.g., "L123" -> 123)
                         line_match = re.search(r"\d+", marker_part)
                         if line_match:
                             line_num = int(line_match.group())
-                            if 1 <= line_num <= len(input_lines):
-                                # Take only the first line of the text part to avoid AI chatter/notes
+                            # Check if this line number belongs to our chunk
+                            if start_index + 1 <= line_num <= start_index + len(lines):
                                 clean_text = text_part.strip().split('\n')[0].strip()
-                                # If AI repeats a line, the latest one in the response will be used
-                                output_lines[line_num - 1] = clean_text
-                    except (ValueError, IndexError):
+                                chunk_output[line_num - start_index - 1] = clean_text
+                    except:
                         continue
                 
-                return "\n".join(output_lines)
+                return chunk_output
 
             except Exception as e:
                 error_msg = str(e)
                 if "503" in error_msg or "UNAVAILABLE" in error_msg:
                     if attempt < max_retries - 1:
                         wait_time = retry_delay * (2 ** attempt)
-                        print(f"Server 503 error. Retrying in {wait_time}s... (Attempt {attempt + 1}/{max_retries})")
                         await asyncio.sleep(wait_time)
                         continue
-                return f"Error: {error_msg}"
-        return "Error: Maximum retries reached."
+                return [f"[Error: {error_msg}]"] * len(lines)
+        
+        return [f"[Error: Max retries reached]"] * len(lines)
+
+    async def translate_batch(self, text: str, target_lang: str) -> str:
+        """Legacy support for non-parallel translation (redirects to parallel with 1 worker)."""
+        return await self.translate_batch_parallel(text, target_lang, num_workers=1)
 
     def reconstruct_srt_with_translation(self, original_segments: List[DubbingSegment], translated_text: str) -> str:
         """Reconstruct SRT using original timestamps and translated text lines."""
