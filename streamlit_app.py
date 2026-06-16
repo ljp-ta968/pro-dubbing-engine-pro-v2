@@ -132,28 +132,40 @@ if st.session_state.step == 1:
                 add_log(f"Starting translation to {selected_lang_name}...")
                 start_time = time.time()
                 
-                # Simple progress with timer
-                progress_placeholder = st.empty()
+                timer_placeholder = st.empty()
                 with st.spinner("AI is translating..."):
                     lines = [re.sub(r'\[.*?\]', '', l).strip() for l in st.session_state.script_content.split('\n') if l.strip()]
                     clean_text = "\n".join(lines)
                     
-                    # Create a task for translation
-                    task = asyncio.create_task(engine.translate_batch(clean_text, selected_lang_name))
-                    
-                    # Update timer while task is running
-                    while not task.done():
-                        elapsed = time.time() - start_time
-                        progress_placeholder.markdown(f"### ⏱️ Elapsed Time: `{elapsed:.2f}s`")
-                        time.sleep(0.1)
-                    
-                    translated = task.result()
-                    st.session_state.translated_script = translated
-                    
-                    elapsed_final = time.time() - start_time
-                    progress_placeholder.success(f"✅ Finished in {elapsed_final:.2f}s")
-                    add_log(f"Translation completed in {elapsed_final:.2f}s")
-                    refresh_logs()
+                    # Fix: Use asyncio.run with a wrapper to avoid loop issues in Streamlit
+                    try:
+                        loop = asyncio.new_event_loop()
+                        asyncio.set_event_loop(loop)
+                        
+                        # Use a separate thread for the timer to avoid blocking
+                        import threading
+                        is_done = False
+                        def update_timer():
+                            while not is_done:
+                                elapsed = time.time() - start_time
+                                timer_placeholder.markdown(f"### ⏱️ Elapsed Time: `{elapsed:.2f}s`")
+                                time.sleep(0.1)
+                        
+                        t = threading.Thread(target=update_timer)
+                        t.start()
+                        
+                        translated = loop.run_until_complete(engine.translate_batch(clean_text, selected_lang_name))
+                        is_done = True
+                        t.join()
+                        
+                        st.session_state.translated_script = translated
+                        elapsed_final = time.time() - start_time
+                        timer_placeholder.success(f"✅ Finished in {elapsed_final:.2f}s")
+                        add_log(f"Translation completed.")
+                        refresh_logs()
+                    except Exception as e:
+                        st.error(f"Error: {str(e)}")
+                        add_log(f"Error during translation: {str(e)}")
 
     with col2:
         st.write("**Translation Output:**")
@@ -166,8 +178,6 @@ if st.session_state.step == 1:
                 st.error("Please translate first.")
             else:
                 add_log("Reconstructing SRT with original timestamps...")
-                start_time = time.time()
-                
                 # Parse original to get timestamps
                 original_segments = engine.parse_srt(st.session_state.script_content)
                 if not original_segments and "[" in st.session_state.script_content:
@@ -219,40 +229,53 @@ elif st.session_state.step == 3:
         add_log(f"Starting Dubbing with {num_chunks} workers...")
         start_time = time.time()
         
-        progress_placeholder = st.empty()
+        timer_placeholder = st.empty()
         with st.spinner("Generating TTS & Merging..."):
-            async def main_workflow():
-                st.session_state.worker_statuses = {i+1: "Idle" for i in range(num_chunks)}
-                update_status(0, "")
-
-                with tempfile.TemporaryDirectory() as tmp_dir:
-                    def ui_callback(worker_id, msg):
-                        update_status(worker_id, msg)
-                        add_log(f"Worker {worker_id}: {msg}")
-
-                    # Use a task for parallel processing
-                    task = asyncio.create_task(engine.process_workflow_parallel(st.session_state.segments, num_chunks, tmp_dir, status_callback=ui_callback))
-                    
-                    while not task.done():
+            try:
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                
+                import threading
+                is_done = False
+                def update_timer_dub():
+                    while not is_done:
                         elapsed = time.time() - start_time
-                        progress_placeholder.markdown(f"### ⏱️ Total Elapsed Time: `{elapsed:.2f}s`")
+                        timer_placeholder.markdown(f"### ⏱️ Total Elapsed Time: `{elapsed:.2f}s`")
                         time.sleep(0.1)
+                
+                t = threading.Thread(target=update_timer_dub)
+                t.start()
 
-                    results = task.result()
-                    st.session_state.results = results
+                async def main_workflow():
+                    st.session_state.worker_statuses = {i+1: "Idle" for i in range(num_chunks)}
+                    update_status(0, "")
 
-                    add_log("Merging audio files...")
-                    merged_audio_path = os.path.join(tmp_dir, "dubbed_audio.mp3")
-                    if engine.merge_audio_files(st.session_state.segments, merged_audio_path):
-                        with open(merged_audio_path, "rb") as f:
-                            st.session_state.merged_audio_data = f.read()
-                        st.session_state.generated_srt_content = engine.generate_srt_content(st.session_state.segments)
-                        add_log("Audio merging completed.")
+                    with tempfile.TemporaryDirectory() as tmp_dir:
+                        def ui_callback(worker_id, msg):
+                            update_status(worker_id, msg)
+                            add_log(f"Worker {worker_id}: {msg}")
 
-            asyncio.run(main_workflow())
-            elapsed_final = time.time() - start_time
-            progress_placeholder.success(f"✅ Dubbing Completed in {elapsed_final:.2f}s")
-            refresh_logs()
+                        results = await engine.process_workflow_parallel(st.session_state.segments, num_chunks, tmp_dir, status_callback=ui_callback)
+                        st.session_state.results = results
+
+                        add_log("Merging audio files...")
+                        merged_audio_path = os.path.join(tmp_dir, "dubbed_audio.mp3")
+                        if engine.merge_audio_files(st.session_state.segments, merged_audio_path):
+                            with open(merged_audio_path, "rb") as f:
+                                st.session_state.merged_audio_data = f.read()
+                            st.session_state.generated_srt_content = engine.generate_srt_content(st.session_state.segments)
+                            add_log("Audio merging completed.")
+
+                loop.run_until_complete(main_workflow())
+                is_done = True
+                t.join()
+                
+                elapsed_final = time.time() - start_time
+                timer_placeholder.success(f"✅ Dubbing Completed in {elapsed_final:.2f}s")
+                refresh_logs()
+            except Exception as e:
+                st.error(f"Error: {str(e)}")
+                add_log(f"Error during dubbing: {str(e)}")
 
     if st.button("⬅️ Back to Step 2"):
         st.session_state.step = 2
