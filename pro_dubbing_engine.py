@@ -88,7 +88,7 @@ class ProDubbingEngine:
                         self.key_usage[key].append(now)
                         client = genai.Client(api_key=key)
                         config = types.GenerateContentConfig(
-                            max_output_tokens=65536,
+                            max_output_tokens=5000,
                             temperature=0.7
                         )
                         return client, config
@@ -206,23 +206,60 @@ class ProDubbingEngine:
         return sentences
 
     async def translate_batch(self, text: str, target_lang: str) -> str:
-        """Translate text using Gemini in batch mode (Standard)."""
-        client, config = await self._get_next_client()
-        if not client:
-            return "Error: No API keys."
-
-        prompt = f"Translate the following text to {target_lang}. Return ONLY the translated text. Maintain the same number of lines as the input. Do not include original timestamps or any formatting. Just the translation line by line."
+        """Translate text using Gemini in batch mode with Numbered Line System and Retry logic."""
+        max_retries = 3
+        retry_delay = 2
         
-        try:
-            response = await asyncio.to_thread(
-                client.models.generate_content,
-                model='gemini-3.5-flash',
-                contents=f"{prompt}\n\n{text}",
-                config=config
-            )
-            return response.text.strip()
-        except Exception as e:
-            return f"Error: {str(e)}"
+        # Prepare numbered input to force line-by-line translation
+        input_lines = [l.strip() for l in text.strip().split('\n') if l.strip()]
+        numbered_input = "\n".join([f"L{i+1}: {line}" for i, line in enumerate(input_lines)])
+        
+        prompt = f"""Translate the following numbered lines to {target_lang}. 
+        Strictly follow these rules:
+        1. Maintain the exact same number of lines.
+        2. Keep the line markers (L1:, L2:, etc.) in your response.
+        3. Return ONLY the translated numbered lines.
+        4. Do not merge lines or add any conversational text.
+        """
+        
+        for attempt in range(max_retries):
+            client, config = await self._get_next_client()
+            if not client:
+                return "Error: No API keys."
+
+            try:
+                response = await asyncio.to_thread(
+                    client.models.generate_content,
+                    model='gemini-3.5-flash',
+                    contents=f"{prompt}\n\n{numbered_input}",
+                    config=config
+                )
+                translated_raw = response.text.strip()
+                
+                # Parse the numbered output back into clean lines
+                output_lines = []
+                for i in range(len(input_lines)):
+                    # Look for L{i+1}: pattern
+                    pattern = rf"L{i+1}:(.*?)(?=L{i+2}:|$)"
+                    match = re.search(pattern, translated_raw, re.DOTALL)
+                    if match:
+                        output_lines.append(match.group(1).strip())
+                    else:
+                        # Fallback if AI missed a marker
+                        output_lines.append(f"[Line {i+1} Translation Missing]")
+                
+                return "\n".join(output_lines)
+
+            except Exception as e:
+                error_msg = str(e)
+                if "503" in error_msg or "UNAVAILABLE" in error_msg:
+                    if attempt < max_retries - 1:
+                        wait_time = retry_delay * (2 ** attempt)
+                        print(f"Server 503 error. Retrying in {wait_time}s... (Attempt {attempt + 1}/{max_retries})")
+                        await asyncio.sleep(wait_time)
+                        continue
+                return f"Error: {error_msg}"
+        return "Error: Maximum retries reached."
 
     def reconstruct_srt_with_translation(self, original_segments: List[DubbingSegment], translated_text: str) -> str:
         """Reconstruct SRT using original timestamps and translated text lines."""
