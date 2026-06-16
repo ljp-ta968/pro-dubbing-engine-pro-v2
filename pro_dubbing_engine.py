@@ -7,7 +7,7 @@ Supports multiple voices (Male/Female), parallel workers, and audio merging.
 import re
 import asyncio
 import edge_tts
-from typing import List, Dict, Tuple, Optional
+from typing import List, Dict, Tuple, Optional, AsyncGenerator
 import os
 import json
 import time
@@ -204,42 +204,47 @@ class ProDubbingEngine:
                 
         return sentences
 
-    async def text_to_srt_with_ai(self, text: str) -> str:
-        """Convert custom formatted text to standard SRT using Gemini AI"""
+    async def translate_streaming(self, text: str, target_lang: str) -> AsyncGenerator[str, None]:
+        """Translate text using Gemini with Streaming Mode."""
         client, config = await self._get_next_client()
         if not client:
-            return self._simple_text_to_srt(text)
+            yield "Error: No API keys."
+            return
 
-        prompt = f"""
-        You are an expert subtitler. Convert the following timestamped text into a professional SRT subtitle format.
+        prompt = f"Translate the following text to {target_lang}. Return ONLY the translated text. Do not include original timestamps or any formatting. Just the translation."
         
-        INPUT FORMAT DESCRIPTION:
-        The input contains timestamps in brackets like [HH:MM:SS] or similar, followed by text. 
-        These timestamps usually indicate the start time of the dialogue.
-        
-        TASK:
-        1. Convert these to standard SRT format (Index, Time Range, Text).
-        2. Create precise time ranges (Start --> End). The 'End' time of a segment should generally be the 'Start' time of the next segment to ensure continuity, unless there's a natural long pause.
-        3. Add milliseconds (e.g., ,070 or ,000) to make it look professional.
-        4. Split the text into readable chunks that follow the natural flow of speech.
-        5. If the input text spans multiple lines but belongs to one sentence, split it logically across SRT indices.
-        
-        INPUT TEXT:
-        {text}
-        
-        OUTPUT ONLY THE VALID SRT CONTENT.
-        """
         try:
-            response = await asyncio.to_thread(
-                client.models.generate_content,
+            # Use generate_content_stream for streaming
+            response_stream = client.models.generate_content_stream(
                 model='gemini-3.5-flash',
-                contents=prompt,
+                contents=f"{prompt}\n\n{text}",
                 config=config
             )
-            return response.text.strip()
+            for chunk in response_stream:
+                if chunk.text:
+                    yield chunk.text
         except Exception as e:
-            print(f"AI SRT conversion failed: {e}")
-            return self._simple_text_to_srt(text)
+            yield f"Error: {str(e)}"
+
+    def reconstruct_srt_with_translation(self, original_segments: List[DubbingSegment], translated_text: str) -> str:
+        """Reconstruct SRT using original timestamps and translated text lines."""
+        # Split translated text into lines, matching the number of original segments
+        translated_lines = [l.strip() for l in translated_text.strip().split('\n') if l.strip()]
+        
+        # If mismatch, try to split by punctuation or just distribute
+        if len(translated_lines) != len(original_segments):
+            # Fallback: Just use simple splitting if lines don't match
+            # This is a basic implementation, can be improved with more complex logic
+            pass
+
+        srt_out = []
+        for i, seg in enumerate(original_segments):
+            text = translated_lines[i] if i < len(translated_lines) else seg.text
+            start_t = self._seconds_to_time(seg.start)
+            end_t = self._seconds_to_time(seg.end)
+            srt_out.append(f"{i+1}\n{start_t} --> {end_t}\n{text}\n")
+        
+        return "\n".join(srt_out)
 
     async def _rewrite_text_with_ai(self, original_text: str, target_duration: float, current_tts_duration: float, lang: str) -> str:
         """Use Gemini AI to rewrite text to better fit target duration."""
@@ -280,37 +285,16 @@ class ProDubbingEngine:
             print(f"AI rewrite failed: {e}")
             return original_text
 
-    def _simple_text_to_srt(self, text: str) -> str:
-        lines = [l.strip() for l in text.strip().split('\n') if l.strip()]
-        srt_out = []
-        idx = 1
-        for i in range(len(lines)):
-            match = re.match(r'\[?(\d{2}:\d{2}:\d{2})\]?\s*(.*)', lines[i])
-            if match:
-                start_time = match.group(1) + ",000"
-                content = match.group(2)
-                end_time = self._add_seconds_to_time(match.group(1), 2) + ",000"
-                srt_out.append(f"{idx}\n{start_time} --> {end_time}\n{content}\n")
-                idx += 1
-        return "\n".join(srt_out)
-
-    def _add_seconds_to_time(self, time_str: str, seconds_to_add: int) -> str:
-        try:
-            t = datetime.datetime.strptime(time_str, "%H:%M:%S")
-            t_new = t + datetime.timedelta(seconds=seconds_to_add)
-            return t_new.strftime("%H:%M:%S")
-        except: return time_str
-
     async def generate_tts_for_sentence(self, sentence: DubbingSentence, output_dir: str, status_callback=None) -> bool:
         """Generate TTS for a full sentence with iterative text rewriting and speed adjustment."""
         target_duration = sentence.duration
         sentence.retries = 0
-        max_ai_retries = 50 
+        max_ai_retries = 3 # Reduced retries for faster processing
 
         while True:
             try:
                 if status_callback:
-                    status_callback(sentence.sentence_id, f"Processing Sentence (Attempt {sentence.retries + 1})")
+                    status_callback(sentence.sentence_id, f"Processing (Attempt {sentence.retries + 1})")
                 
                 lang_voices = self.voice_map.get(self.output_language, self.voice_map["my"])
                 voice = lang_voices.get(self.voice_gender, lang_voices["Male"])
@@ -321,11 +305,10 @@ class ProDubbingEngine:
                     await communicate.save(temp_output_path)
                 except Exception as e:
                     print(f"Edge-TTS failed: {e}")
-                    # If TTS fails, increment retry and wait
                     sentence.retries += 1
                     if sentence.retries >= max_ai_retries:
                         return False
-                    await asyncio.sleep(2)
+                    await asyncio.sleep(1)
                     continue
                 
                 tts_duration = self._get_audio_duration(temp_output_path)
@@ -333,147 +316,93 @@ class ProDubbingEngine:
 
                 if tts_duration > 0 and (abs(tts_duration - target_duration) <= self.tolerance or sentence.retries >= max_ai_retries):
                     final_output_path = os.path.join(output_dir, f"sent_{sentence.sentence_id}.mp3")
-                    if self._adjust_audio_speed(temp_output_path, target_duration, final_output_path):
-                        sentence.tts_audio_path = final_output_path
-                        sentence.status = "completed"
-                        if status_callback: status_callback(sentence.sentence_id, "Completed")
-                        
-                        # Split the audio back into segments (simple proportional split for now)
-                        self._split_sentence_audio_to_segments(sentence, final_output_path, output_dir)
-                        
-                        if os.path.exists(temp_output_path): os.remove(temp_output_path)
-                        return True
+                    
+                    # Final speed adjustment if still out of tolerance
+                    if abs(tts_duration - target_duration) > self.tolerance:
+                        self._adjust_audio_speed(temp_output_path, target_duration, final_output_path)
                     else:
-                        sentence.status = "error"
-                        if os.path.exists(temp_output_path): os.remove(temp_output_path)
-                        return False
-                else:
-                    new_text = await self._rewrite_text_with_ai(
-                        sentence.adjusted_text, target_duration, tts_duration, self.output_language
-                    )
-                    # If AI fails to rewrite (returns same text), we still increment retry
-                    sentence.adjusted_text = new_text
-                    sentence.retries += 1
-                    if os.path.exists(temp_output_path): os.remove(temp_output_path)
-                    continue
-            except Exception as e:
-                sentence.status = f"error: {e}"
-                if status_callback: status_callback(sentence.sentence_id, f"Error: {e}")
+                        os.rename(temp_output_path, final_output_path)
+                    
+                    sentence.tts_audio_path = final_output_path
+                    sentence.status = "completed"
+                    return True
+                
+                # If not within tolerance, rewrite and try again
+                sentence.adjusted_text = await self._rewrite_text_with_ai(
+                    sentence.text, target_duration, tts_duration, self.output_language
+                )
                 sentence.retries += 1
-                if sentence.retries >= max_ai_retries:
-                    return False
-                await asyncio.sleep(2) # Wait a bit before retrying on error
-                continue
-
-    def _split_sentence_audio_to_segments(self, sentence: DubbingSentence, audio_path: str, output_dir: str):
-        """Split a sentence audio file back into its constituent segments based on original durations."""
-        try:
-            full_audio = AudioSegment.from_file(audio_path)
-            total_original_duration = sum(s.duration for s in sentence.segments)
-            
-            current_pos = 0
-            for seg in sentence.segments:
-                # Calculate proportional duration in the generated audio
-                seg_ratio = seg.duration / total_original_duration
-                seg_audio_len = len(full_audio) * seg_ratio
                 
-                seg_audio = full_audio[current_pos : current_pos + int(seg_audio_len)]
-                seg_path = os.path.join(output_dir, f"seg_{seg.segment_id}.mp3")
-                seg_audio.export(seg_path, format="mp3")
-                
-                seg.tts_audio_path = seg_path
-                seg.status = "tts_generated_adjusted"
-                current_pos += int(seg_audio_len)
-        except Exception as e:
-            print(f"Error splitting sentence audio: {e}")
-
-    async def process_sentence_chunk(self, sentences: List[DubbingSentence], output_dir: str, chunk_id: int, status_callback=None):
-        """Process sentences in a chunk sequentially."""
-        for sent in sentences:
-            if status_callback:
-                status_callback(chunk_id, f"Worker {chunk_id}: Processing Sentence {sent.sentence_id}")
-            await self.generate_tts_for_sentence(sent, output_dir, status_callback=lambda sid, msg: status_callback(chunk_id, f"Worker {chunk_id}: Sent {sid} - {msg}") if status_callback else None)
-
-    async def process_workflow_parallel(self, segments: List[DubbingSegment], num_workers: int, output_dir: str, status_callback=None) -> Dict:
-        if not os.path.exists(output_dir): os.makedirs(output_dir)
-        
-        # 1. Group segments into sentences
-        sentences = self.group_segments_into_sentences(segments)
-        
-        # 2. Chunk sentences for parallel workers
-        if not sentences: return {}
-        num_workers = min(num_workers, len(sentences))
-        k, m = divmod(len(sentences), num_workers)
-        sentence_chunks = [sentences[i*k+min(i, m):(i+1)*k+min(i+1, m)] for i in range(num_workers)]
-        
-        # 3. Process sentence chunks in parallel
-        worker_tasks = [self.process_sentence_chunk(chunk, output_dir, i+1, status_callback) for i, chunk in enumerate(sentence_chunks)]
-        # Use return_exceptions=True to ensure we catch errors but wait for all
-        await asyncio.gather(*worker_tasks, return_exceptions=True)
-        
-        # After all sentences are processed, segments are already updated via _split_sentence_audio_to_segments
-        # Set final_audio_path for successful segments
-        successful_count = 0
-        for seg in segments:
-            if seg.status == "tts_generated_adjusted":
-                seg.final_audio_path = seg.tts_audio_path
-                successful_count += 1
-
-        return {
-            "total": len(segments),
-            "successful": successful_count,
-            "segments": [{"id": s.segment_id, "start": s.start, "end": s.end, "text": s.text, "status": s.status} for s in segments]
-        }
-
-    def merge_audio_files(self, segment_list: List[DubbingSegment], output_path: str) -> bool:
-        """Merge all generated audio files into a single audio file with silence padding for timing."""
-        try:
-            # Sort segments by segment_id to ensure correct order
-            sorted_segments = sorted(segment_list, key=lambda x: x.segment_id)
-            
-            # Filter only segments with valid final audio paths
-            valid_segments = [s for s in sorted_segments if s.final_audio_path and os.path.exists(s.final_audio_path)]
-            
-            if not valid_segments:
+            except Exception as e:
+                print(f"Sentence processing error: {e}")
                 return False
 
-            # Create an empty audio segment
-            final_audio = AudioSegment.silent(duration=0)
-            
-            current_time_ms = 0
-            
-            for seg in sorted_segments:
-                target_start_ms = int(seg.start * 1000)
-                
-                # Add silence if there's a gap between segments
-                if target_start_ms > current_time_ms:
-                    silence_duration = target_start_ms - current_time_ms
-                    final_audio += AudioSegment.silent(duration=silence_duration)
-                    current_time_ms = target_start_ms
-                
-                if seg.final_audio_path and os.path.exists(seg.final_audio_path):
-                    seg_audio = AudioSegment.from_file(seg.final_audio_path)
-                    final_audio += seg_audio
-                    current_time_ms += len(seg_audio)
-                else:
-                    # If segment failed, add silence for its duration to maintain timing
-                    duration_ms = int(seg.duration * 1000)
-                    final_audio += AudioSegment.silent(duration=duration_ms)
-                    current_time_ms += duration_ms
+    async def process_workflow_parallel(self, segments: List[DubbingSegment], num_workers: int, output_dir: str, status_callback=None) -> Dict:
+        """Process sentences in parallel."""
+        sentences = self.group_segments_into_sentences(segments)
+        semaphore = asyncio.Semaphore(num_workers)
+        
+        async def worker(sentence):
+            async with semaphore:
+                return await self.generate_tts_for_sentence(sentence, output_dir, status_callback)
 
-            final_audio.export(output_path, format="mp3", bitrate="192k")
+        tasks = [worker(s) for s in sentences]
+        results = await asyncio.gather(*tasks)
+        
+        # Distribute sentence results back to segments
+        for sentence in sentences:
+            if sentence.tts_audio_path:
+                # For simplicity, we just assign the sentence audio to segments
+                # A more complex version would split the sentence audio back to segments
+                for seg in sentence.segments:
+                    seg.tts_audio_path = sentence.tts_audio_path
+                    seg.status = "completed"
+        
+        return {
+            "total_sentences": len(sentences),
+            "completed": sum(1 for r in results if r),
+            "segments": [
+                {"id": s.segment_id, "start": s.start, "end": s.end, "text": s.text, "status": s.status}
+                for s in segments
+            ]
+        }
+
+    def merge_audio_files(self, segments: List[DubbingSegment], output_path: str) -> bool:
+        """Merge individual segment audios into one file with precise timing."""
+        try:
+            if not segments:
+                return False
+            
+            # Create silence for the total duration
+            total_duration_ms = int(segments[-1].end * 1000)
+            combined = AudioSegment.silent(duration=total_duration_ms)
+            
+            # Keep track of processed sentences to avoid double-pasting
+            processed_sentences = set()
+            
+            for seg in segments:
+                if seg.sentence_id in processed_sentences:
+                    continue
+                
+                if seg.tts_audio_path and os.path.exists(seg.tts_audio_path):
+                    audio = AudioSegment.from_file(seg.tts_audio_path)
+                    # Find the sentence start time
+                    # We need to find the first segment of this sentence
+                    sentence_start_ms = int(seg.start * 1000) # Simplified
+                    combined = combined.overlay(audio, position=sentence_start_ms)
+                    processed_sentences.add(seg.sentence_id)
+            
+            combined.export(output_path, format="mp3", bitrate="192k")
             return True
         except Exception as e:
-            print(f"Error merging audio files: {e}")
+            print(f"Error merging audio: {e}")
             return False
 
     def generate_srt_content(self, segments: List[DubbingSegment]) -> str:
-        """Generate SRT file content from processed segments."""
-        srt_lines = []
+        """Generate final SRT content."""
+        srt_out = []
         for i, seg in enumerate(segments):
-            start_time = self._seconds_to_time(seg.start)
-            end_time = self._seconds_to_time(seg.end)
-            # Use adjusted_text if available, otherwise fallback to original text
-            display_text = getattr(seg, 'adjusted_text', seg.text)
-            srt_lines.append(f"{i+1}\n{start_time} --> {end_time}\n{display_text}\n")
-        return "\n".join(srt_lines)
+            start_t = self._seconds_to_time(seg.start)
+            end_t = self._seconds_to_time(seg.end)
+            srt_out.append(f"{i+1}\n{start_t} --> {end_t}\n{seg.text}\n")
+        return "\n".join(srt_out)
